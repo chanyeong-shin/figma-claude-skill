@@ -1,0 +1,109 @@
+--- a/src/claude_mcp_plugin/ui.html
++++ b/src/claude_mcp_plugin/ui.html
+@@ -298,6 +298,54 @@
+         portInput.disabled = isConnected;
+       }
+ 
++      // ─────────────────────────────────────────────────────────────
++      // [커스텀] 자동 재연결 로직
++      //  · 원본 플러그인은 재연결을 하지 않아, Figma가 플러그인 UI를 언로드하면
++      //    (WebSocket close code 1001 "Going Away") 수동으로 다시 Connect 해야 했다.
++      //  · 채널명이 "claude"로 고정돼 있어 재연결해도 동일 채널로 복귀한다.
++      //  · 지수 백오프(1s → 최대 10s)로 재시도하며, 사용자가 명시적으로
++      //    Disconnect 를 누른 경우에는 재시도하지 않는다.
++      // ─────────────────────────────────────────────────────────────
++      var reconnectTimer = null;
++      var reconnectDelay = 1000;
++      var manualDisconnect = false;
++
++      function scheduleReconnect() {
++        if (manualDisconnect) return;          // 사용자가 직접 끊은 경우 재시도 안 함
++        if (reconnectTimer) return;            // 이미 예약돼 있으면 중복 방지
++        updateConnectionStatus(
++          false,
++          "Reconnecting in " + Math.round(reconnectDelay / 1000) + "s..."
++        );
++        reconnectTimer = setTimeout(function () {
++          reconnectTimer = null;
++          reconnectDelay = Math.min(reconnectDelay * 2, 10000);   // 백오프 상한 10초
++          connectToServer(state.serverPort || 3055);
++        }, reconnectDelay);
++      }
++
++      function cancelReconnect() {
++        if (reconnectTimer) {
++          clearTimeout(reconnectTimer);
++          reconnectTimer = null;
++        }
++        reconnectDelay = 1000;                 // 연결 성공 시 백오프 초기화
++      }
++
++      // 플러그인 UI가 다시 보이게 되면 즉시 재연결 시도 (백오프 대기 건너뜀)
++      document.addEventListener("visibilitychange", function () {
++        if (!document.hidden && !state.connected && !manualDisconnect) {
++          cancelReconnect();
++          connectToServer(state.serverPort || 3055);
++        }
++      });
++      window.addEventListener("focus", function () {
++        if (!state.connected && !manualDisconnect) {
++          cancelReconnect();
++          connectToServer(state.serverPort || 3055);
++        }
++      });
++
+       // Connect to WebSocket server
+       async function connectToServer(port) {
+         try {
+@@ -310,6 +358,9 @@
+           state.socket = new WebSocket(`ws://localhost:${port}`);
+ 
+           state.socket.onopen = () => {
++            cancelReconnect();          // [커스텀] 연결 성공 → 백오프 초기화
++            manualDisconnect = false;   // [커스텀] 자동 재연결 다시 허용
++
+             // Generate random channel name
+             const channelName = generateChannelName();
+             console.log("Joining channel:", channelName);
+@@ -366,6 +417,12 @@
+             state.connected = false;
+             state.socket = null;
+             updateConnectionStatus(false, "Disconnected from server");
++
++            // [커스텀] 자동 재연결
++            // 원본은 끊기면 그대로 방치했다. Figma가 백그라운드에서 플러그인 UI를
++            // 언로드하면(close code 1001) 사용자가 수동으로 Connect를 다시 눌러야 했다.
++            // 채널명이 고정("claude")이므로 재연결해도 같은 채널로 복귀한다.
++            scheduleReconnect();
+           };
+ 
+           state.socket.onerror = (error) => {
+@@ -385,6 +442,8 @@
+ 
+       // Disconnect from websocket server
+       function disconnectFromServer() {
++        manualDisconnect = true;   // [커스텀] 사용자가 직접 끊음 → 자동 재연결 금지
++        cancelReconnect();         // [커스텀] 예약된 재시도 취소
+         if (state.socket) {
+           state.socket.close();
+           state.socket = null;
+@@ -514,14 +573,11 @@
+ 
+       // Add this function after the generateId() function
+       function generateChannelName() {
+-        const characters = "abcdefghijklmnopqrstuvwxyz0123456789";
+-        let result = "";
+-        for (let i = 0; i < 8; i++) {
+-          result += characters.charAt(
+-            Math.floor(Math.random() * characters.length)
+-          );
+-        }
+-        return result;
++        // [커스텀] 고정 채널 사용.
++        // 원래는 매번 랜덤 8자를 생성했으나, Connect 할 때마다 채널이 바뀌어
++        // 사용자가 채널 ID를 옮겨 적는 사이 연결이 끊기는 문제가 있었다.
++        // 고정하면 재연결 시에도 같은 채널이라 ID 교환이 불필요하다.
++        return "claude";
+       }
+ 
+       // Tab switching
